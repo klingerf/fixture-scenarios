@@ -67,49 +67,64 @@ class Fixtures < YAML::Omap
   end
   
   private
-
+  
     def read_fixture_files
       if yaml_content?
-        # YAML fixtures
-        begin
-          yaml_string = ""
-          @fixture_paths.each do |fixture_path|
-            Dir["#{yaml_file_path(fixture_path)}/**/*.yml"].select {|f| test(?f,f) }.each do |subfixture_path|
-              yaml_string << IO.read(subfixture_path)
-            end
-            yaml_string << IO.read(yaml_file_path(fixture_path)) << "\n"
-          end
-
-          if yaml = YAML::load(erb_render(yaml_string))
-            yaml = yaml.value if yaml.respond_to?(:type_id) and yaml.respond_to?(:value)
-            yaml.each do |name, data|
-              self[name] = Fixture.new(data, @class_name)
-            end
-          end
-        rescue Exception=>boom
-          raise Fixture::FormatError, "a YAML error occurred parsing one of #{(@fixture_paths.map { |o| yaml_file_path(o) }).inspect}. Please note that YAML must be consistently indented using spaces. Tabs are not allowed. Please have a look at http://www.yaml.org/faq.html\nThe exact error was:\n  #{boom.class}: #{boom}"
-        end
+        read_yaml_fixture_files
       elsif csv_content?
-        # CSV fixtures
-        @fixture_paths.each do |fixture_path|
-          reader = CSV::Reader.create(erb_render(IO.read(csv_file_path(fixture_path))))
-          header = reader.shift
-          i = 0
-          reader.each do |row|
-            data = {}
-            row.each_with_index { |cell, j| data[header[j].to_s.strip] = cell.to_s.strip }
-            self["#{Inflector::underscore(@class_name)}_#{i+=1}"]= Fixture.new(data, @class_name)
-          end
-        end
-      elsif deprecated_yaml_content?
-        raise Fixture::FormatError, ".yml extension required for all files."
+        read_csv_fixture_files
       else
         # Standard fixtures
-        Dir.entries(@fixture_path).each do |file|
-          path = File.join(@fixture_path, file)
-          if File.file?(path) and file !~ @file_filter
-            self[file] = Fixture.new(path, @class_name)
+        @fixture_paths.each do |fixture_path|
+          Dir.entries(fixture_path).each do |file|
+            path = File.join(fixture_path, file)
+            if File.file?(path) and file !~ @file_filter
+              self[file] = Fixture.new(path, @class_name)
+            end
           end
+        end
+      end
+    end
+    
+    def read_yaml_fixture_files
+      yaml_string = ""
+      @fixture_paths.each do |fixture_path|
+        Dir["#{yaml_file_path(fixture_path)}/**/*.yml"].select {|f| test(?f,f) }.each do |subfixture_path|
+          yaml_string << IO.read(subfixture_path)
+        end
+        yaml_string << IO.read(yaml_file_path(fixture_path)) << "\n"
+      end
+      
+      if yaml = parse_yaml_string(yaml_string, @fixture_paths.first)
+        # If the file is an ordered map, extract its children.
+        yaml_value =
+          if yaml.respond_to?(:type_id) && yaml.respond_to?(:value)
+            yaml.value
+          else
+            [yaml]
+          end
+          
+        yaml_value.each do |fixture|
+          fixture.each do |name, data|
+            unless data
+              raise Fixture::FormatError, "Bad data for #{@class_name} fixture named #{name} (nil)"
+            end
+            
+            self[name] = Fixture.new(data, @class_name)
+          end
+        end
+      end
+    end
+    
+    def read_csv_fixture_files
+      @fixture_paths.each do |fixture_path|
+        reader = CSV::Reader.create(erb_render(IO.read(csv_file_path(fixture_path))))
+        header = reader.shift
+        i = 0
+        reader.each do |row|
+          data = {}
+          row.each_with_index { |cell, j| data[header[j].to_s.strip] = cell.to_s.strip }
+          self["#{Inflector::underscore(@class_name)}_#{i+=1}"]= Fixture.new(data, @class_name)
         end
       end
     end
@@ -118,20 +133,11 @@ class Fixtures < YAML::Omap
       File.file?(@fixture_paths.first + ".yml") ||
       File.file?(@fixture_paths.first)
     end
-
+    
     def yaml_file_path(file)
       file =~ /\.yml$/ ? file : "#{file}.yml"
     end
     
-    def deprecated_yaml_content?
-      File.file?(@fixture_paths.first + ".yaml") ||
-      File.file?(@fixture_paths.first)
-    end
-
-    def deprecated_yaml_file_path
-      "#{@fixture_path}.yaml"
-    end
-
     def csv_content?
       File.file?(@fixture_paths.first + ".csv") ||
       File.file?(@fixture_paths.first)
@@ -139,6 +145,12 @@ class Fixtures < YAML::Omap
     
     def csv_file_path(file)
       file =~ /\.csv$/ ? file : "#{file}.csv"
+    end
+    
+    def parse_yaml_string(fixture_content, fixture_path)
+      YAML::load(erb_render(fixture_content))
+    rescue => error
+      raise Fixture::FormatError, "a YAML error occurred parsing #{yaml_file_path(fixture_path)}. Please note that YAML must be consistently indented using spaces. Tabs are not allowed. Please have a look at http://www.yaml.org/faq.html\nThe exact error was:\n  #{error.class}: #{error}"
     end
 end
 
@@ -202,7 +214,7 @@ module Test #:nodoc:
         scenario_path = Dir.glob("#{self.fixture_path}/**/*").grep(Regexp.new("/#{scenario_name}$")).first
         scenario_path = scenario_path[self.fixture_path.length..scenario_path.length]
         scenario_dirs = scenario_path.split('/').unshift('')
-
+        
         # collect the file paths from which to load
         scenario_paths = []
         while !scenario_dirs.empty?
